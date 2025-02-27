@@ -8,7 +8,7 @@ import os
 # 設定模型保存路徑
 MODEL_SAVE_PATH = "fine_tuned_gpt2"
 
-# 載入或初始化模型和 tokenizer
+# 載入或初始化模型和 tokenizer  
 @st.cache_resource
 def load_model():
     if os.path.exists(MODEL_SAVE_PATH):
@@ -17,6 +17,11 @@ def load_model():
     else:
         tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
         model = GPT2LMHeadModel.from_pretrained("gpt2")
+        
+    # 設置填充符號（pad_token），如果沒有就使用 eos_token 或自定義填充符號
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token  # 使用 eos_token 來作為填充符號
+    
     return tokenizer, model
 
 tokenizer, model = load_model()
@@ -68,7 +73,7 @@ def train_model(training_data, file_type):
             texts,
             return_tensors="pt",
             truncation=True,
-            padding=True,
+            padding=True,  # 確保填充
             max_length=256,  # 避免過長
             add_special_tokens=True
         )

@@ -1,8 +1,9 @@
 import streamlit as st
 import torch
+import json
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
-import os
 from torch.utils.data import Dataset, DataLoader
+import os
 
 # 設定模型保存路徑
 MODEL_SAVE_PATH = "fine_tuned_gpt2"
@@ -22,40 +23,66 @@ tokenizer, model = load_model()
 
 # 自定義 Dataset 類別
 class TextDataset(Dataset):
-    def __init__(self, encodings):
-        self.encodings = encodings
+    def __init__(self, input_ids, attention_masks):
+        self.input_ids = input_ids
+        self.attention_masks = attention_masks
 
     def __len__(self):
-        return len(self.encodings.input_ids)
+        return len(self.input_ids)
 
     def __getitem__(self, idx):
-        return {key: val[idx] for key, val in self.encodings.items()}
+        return {
+            "input_ids": self.input_ids[idx],
+            "attention_mask": self.attention_masks[idx]
+        }
 
-# 訓練模型
-def train_model(training_text):
-    # 檢查 training_text 是否為空或格式不正確
-    if not training_text or not isinstance(training_text, str):
-        st.error("訓練數據為空或格式不正確！")
+# 訓練模型（支持 JSON 或 TXT）
+def train_model(training_data, file_type):
+    if not training_data:
+        st.error("訓練數據為空！")
+        return
+
+    texts = []
+    if file_type == "json":
+        try:
+            data = json.loads(training_data)
+            if isinstance(data, dict):
+                data = data.get("texts", [])  # 支援 JSON 內含 "texts" 鍵
+            texts = [item["text"] for item in data if "text" in item]
+        except Exception as e:
+            st.error(f"JSON 解析錯誤：{e}")
+            return
+    elif file_type == "txt":
+        texts = [line.strip() for line in training_data.split("\n") if line.strip()]
+    else:
+        st.error("不支援的檔案類型！")
+        return
+
+    if not texts:
+        st.error("解析後沒有可用的訓練數據！")
         return
 
     # 將文本轉換為 tokenized 格式
-    inputs = tokenizer(training_text, return_tensors="pt", max_length=512, truncation=True, padding="max_length")
-    
-    # 創建 Dataset 和 DataLoader
-    dataset = TextDataset(inputs)
+    encodings = tokenizer(
+        texts,
+        return_tensors="pt",
+        max_length=512,
+        truncation=True,
+        padding="max_length",
+        add_special_tokens=True
+    )
+
+    dataset = TextDataset(encodings["input_ids"], encodings["attention_mask"])
     dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
 
-    # 設定訓練參數
     optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
-    epochs = 3
-
-    # 將模型移到 GPU（如果可用）
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.train()
 
-    # 訓練模型
+    epochs = 3
     for epoch in range(epochs):
+        total_loss = 0
         for batch in dataloader:
             optimizer.zero_grad()
             input_ids = batch["input_ids"].to(device)
@@ -64,58 +91,54 @@ def train_model(training_text):
             loss = outputs.loss
             loss.backward()
             optimizer.step()
-        st.write(f"Epoch {epoch + 1} completed. Loss: {loss.item()}")
+            total_loss += loss.item()
+        st.write(f"Epoch {epoch+1}, Loss: {total_loss/len(dataloader):.4f}")
 
-    # 保存模型
     model.save_pretrained(MODEL_SAVE_PATH)
     tokenizer.save_pretrained(MODEL_SAVE_PATH)
-    st.success("模型訓練完成並已保存！")
+    st.success("模型訓練完成！")
+    st.cache_resource.clear()
 
 # 生成文本
 def generate_text(prompt):
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to("cuda" if torch.cuda.is_available() else "cpu")
-    output = model.generate(input_ids, max_length=50, num_return_sequences=1)
-    generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-    return generated_text
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+    output = model.generate(input_ids, max_length=100, num_return_sequences=1)
+    return tokenizer.decode(output[0], skip_special_tokens=True)
 
 # Streamlit UI
-st.title("GPT-2 訓練與對話應用程式")
-
-# 側邊欄選單
-option = st.sidebar.selectbox(
-    "選擇功能",
-    ["與 AI 對話", "上傳訓練用檔案", "下載訓練完畢的模型"]
-)
+st.title("GPT-2 訓練與對話應用")
+option = st.sidebar.selectbox("選擇功能", ["與 AI 對話", "上傳訓練檔案", "下載模型"])
 
 if option == "與 AI 對話":
     st.header("與 AI 對話")
-    user_input = st.text_input("輸入你的問題或提示：")
-    if st.button("生成回應"):
+    user_input = st.text_input("輸入提示：")
+    if st.button("生成"):
         if user_input:
             response = generate_text(user_input)
-            st.write("AI 的回應：")
+            st.write("AI 回應：")
             st.write(response)
         else:
-            st.warning("請輸入一些文字！")
+            st.warning("請輸入內容！")
 
-elif option == "上傳訓練用檔案":
-    st.header("上傳訓練用檔案")
-    uploaded_file = st.file_uploader("上傳訓練數據 (txt 檔案)", type="txt")
-    if uploaded_file is not None:
-        training_text = uploaded_file.read().decode("utf-8")
-        st.write("檔案上傳成功！")
+elif option == "上傳訓練檔案":
+    st.header("上傳訓練檔案")
+    uploaded_file = st.file_uploader("選擇檔案（JSON 或 TXT）", type=["json", "txt"])
+    if uploaded_file:
+        file_type = "json" if uploaded_file.type == "application/json" else "txt"
+        content = uploaded_file.read().decode("utf-8")
+        st.write("檔案解析成功！")
         if st.button("開始訓練"):
-            train_model(training_text)
+            train_model(content, file_type)
 
-elif option == "下載訓練完畢的模型":
-    st.header("下載訓練完畢的模型")
+elif option == "下載模型":
+    st.header("下載模型")
     if os.path.exists(MODEL_SAVE_PATH):
-        st.write("訓練後的模型已準備好下載。")
         st.download_button(
-            label="下載模型",
+            "下載模型權重",
             data=open(os.path.join(MODEL_SAVE_PATH, "pytorch_model.bin"), "rb"),
-            file_name="pytorch_model.bin",
+            file_name="gpt2_finetuned.bin",
             mime="application/octet-stream"
         )
     else:
-        st.warning("尚未訓練模型，請先訓練模型！")
+        st.warning("尚未訓練模型！")
